@@ -1,10 +1,8 @@
 import numpy as np
-import copy
 from scipy.spatial import ConvexHull
 from math import atan2, pi
 
-from utils import normalize, get_angle, adjacent, clockwise_sort, get_extreme_distance, mode
-from plotters import dump_points
+from utils import Basis_ortho, get_principal_axes, get_angle, adjacent, clockwise_sort, min_distance, mode
 
 #################################################
 #                                               #
@@ -12,86 +10,21 @@ from plotters import dump_points
 #                                               #
 #################################################
 
-
-
-class Grid:
+# Basis plus exact number of cells horizontally and vertically
+class Grid(Basis_ortho):
     def __init__(self):
-        self.offset = np.zeros(2)
+        super()
         self.dims = np.ones(2, dtype=np.int32)
 
-        self.basis_u = np.array([1, 0])
-        self.basis_v = np.array([0, 1])
-
-        self.proj_u = np.array([1, 0])
-        self.proj_v = np.array([0, 1])
-
-    def to_local(self, point : np.ndarray) -> np.ndarray:
-        """
-        Map global point to local integer coords.
-        """
-        pos_u = np.dot(self.proj_u, point - self.offset)
-        pos_v = np.dot(self.proj_v, point - self.offset)
-
-        return np.round(np.array([pos_u, pos_v])).astype(np.int32)
-
-    def to_global(self, coords : np.ndarray) -> np.ndarray:
-        """
-        Map a grid cell's row and column to global coords.
-        """
-        return self.offset + self.basis_u * coords[0] + self.basis_v * coords[1]
 
 
-
-class Principal_axes:
-    def __init__(self):
-        self.origin = np.zeros(2)
-        self.major_axis = np.zeros(2)
-        self.minor_axis = np.zeros(2)
-
-    def to_local(self, point : np.ndarray) -> np.ndarray:
-        proj_mat = np.linalg.inv(np.column_stack([self.major_axis, self.minor_axis]))
-        return np.matmul(proj_mat, point)
-
-
-
+# A polygon with 4 points with known orientation in space
 class Bounding_polygon:
     def __init__(self):
         self.top_left = np.zeros(2)
         self.top_right = np.zeros(2)
         self.bottom_right = np.zeros(2)
         self.bottom_left = np.zeros(2)
-
-
-
-def get_principal_axes(points : list[np.ndarray]) -> Principal_axes | None:
-    """
-    Get center of given set of points and orthogonal axes with most and least variance.
-    """
-    centroid = np.array([0.0, 0.0])
-    for p in points:
-        centroid += p
-    centroid = centroid / len(points)
-    centered_pts = np.array(points) - centroid
-
-    cov_mat = np.cov(centered_pts.transpose())
-    D_sqrt = np.sqrt((cov_mat[0][0] - cov_mat[1][1])**2 + 4*cov_mat[0][1]**2)
-
-    eigenvalue1 = ((cov_mat[0][0] + cov_mat[1][1]) - D_sqrt) / 2
-    eigenvalue2 = ((cov_mat[0][0] + cov_mat[1][1]) - D_sqrt) / 2
-
-    major_value = eigenvalue1 if abs(eigenvalue1) > abs(eigenvalue2) else eigenvalue2
-    if eigenvalue1 == 0:
-        return None
-
-    major_axis = normalize(np.array([cov_mat[0][1], -(cov_mat[0][0] - major_value)]))
-    minor_axis = np.array([-major_axis[1], major_axis[0]])
-
-    axes = Principal_axes()
-    axes.major_axis = major_axis
-    axes.minor_axis = minor_axis
-    axes.origin = centroid
-
-    return axes
 
 
 
@@ -191,8 +124,8 @@ def get_bounding_polygon(points : list[np.ndarray],
 def detect_grid(points : list[np.ndarray],
                 acuteness_thr = 5*pi/6,
                 line_sideways_deviation_thr = 0.33,
-                line_spacing_deviation_thr = 0.25,
-                bin_width = 0.33,
+                line_spacing_deviation_thr = 0.5,
+                bin_width = 0.5,
                 cell_xy_ratio_estimate = 1.0) -> Grid | None:
     
     if len(points) == 0: # Trivial cases
@@ -218,7 +151,10 @@ def detect_grid(points : list[np.ndarray],
         if max_major_spacing / min_major_spacing - 1 > line_spacing_deviation_thr:
             return None # Unevenly spaced
         else:
-            direction = atan2(principal_axes.major_axis[1], principal_axes.major_axis[0])
+            major_axis = principal_axes.basis_u
+            minor_axis = principal_axes.basis_v
+            
+            direction = atan2(major_axis[1], major_axis[0])
             mean_index = (len(points) - 1) / 2
             index_variance = mean_index**2 /3 
             # Mean of major coordinates is 0
@@ -229,42 +165,35 @@ def detect_grid(points : list[np.ndarray],
                 coords_index_correlation += (i - mean_index) * u
 
             spacing = coords_index_correlation / len(points) / index_variance
-            flat_offset = -spacing * mean_index
 
-            principal_axes.major_axis *= spacing
-            principal_axes.minor_axis *= spacing
-            principal_axes.offset += principal_axes.major_axis * flat_offset
+            major_axis *= spacing
+            minor_axis *= spacing
 
-            proj_matrix = np.linalg.inv(np.column_stack([principal_axes.major_axis, principal_axes.minor_axis]))
             grid = Grid()
 
             if direction > 3*pi/4 or direction < pi/4: # Nx1, horizontal
                 # Make sure axes increase from top to bottom and left to right
-                if principal_axes.major_axis[0] < 0:
-                    principal_axes.major_axis *= -1
-                if principal_axes.minor_axis[1] < 0:
-                    principal_axes.minor_axis *= -1
+                if major_axis[0] < 0:
+                    major_axis *= -1
+                if minor_axis[1] < 0:
+                    minor_axis *= -1
 
                 grid.dims = np.array([len(points), 1], dtype=np.int32)
-                grid.basis_u = principal_axes.major_axis
-                grid.basis_v = principal_axes.minor_axis
-
-                grid.proj_u = proj_matrix[0]
-                grid.proj_v = proj_matrix[1]
+                grid.basis_u = major_axis
+                grid.basis_v = minor_axis
 
             else: # 1xN, vertical
                 # Make sure axes increase from top to bottom and left to right
-                if principal_axes.major_axis[1] < 0:
-                    principal_axes.major_axis *= -1
-                if principal_axes.minor_axis[0] < 0:
-                    principal_axes.minor_axis *= -1
+                if major_axis[1] < 0:
+                    major_axis *= -1
+                if minor_axis[0] < 0:
+                    minor_axis *= -1
 
                 grid.dims = np.array([1, len(points)], dtype=np.int32)
-                grid.basis_u = principal_axes.minor_axis
-                grid.basis_v = principal_axes.major_axis
+                grid.basis_u = minor_axis
+                grid.basis_v = major_axis
 
-                grid.proj_u = proj_matrix[1]
-                grid.proj_v = proj_matrix[0]
+            grid.origin = principal_axes.origin - major_axis * (len(points) - 1)/2.0
 
             return grid
         
@@ -285,17 +214,22 @@ def detect_grid(points : list[np.ndarray],
     
     offset = centroid - (horizontal_axis + vertical_axis) / 2
 
-    proj_matrix = np.linalg.inv(np.column_stack([horizontal_axis, vertical_axis]))
-    normalized_points = [np.dot(proj_matrix, p) for p in points]
+    norm_basis = Basis_ortho()
+    norm_basis.basis_u, norm_basis.basis_v, norm_basis.origin = horizontal_axis, vertical_axis, offset
+
+    normalized_points = [norm_basis.to_local(p) for p in points]
 
     # Calculate bin sizes for each axis
-    min_norm_distance = get_extreme_distance(normalized_points, minimum=True)
-    x_bin_size, y_bin_size = min_norm_distance, min_norm_distance
+    min_norm_distance = min_distance(normalized_points)
 
-    if cell_xy_ratio_estimate < 1: # min distance is likely from X axis neighbors
-        y_bin_size *= cell_xy_ratio_estimate  
-    else: # likely from Y axis neighbors
-        x_bin_size *= cell_xy_ratio_estimate
+    x_bin_size, y_bin_size = min_norm_distance * bin_width, min_norm_distance * bin_width
+
+    xy_scale_ratio = cell_xy_ratio_estimate * np.linalg.norm(vertical_axis) / np.linalg.norm(horizontal_axis)
+
+    if xy_scale_ratio < 1: # min distance is likely from normalized X axis neighbors
+        y_bin_size /= xy_scale_ratio  
+    else: # likely from normalized Y axis neighbors
+        x_bin_size *= xy_scale_ratio
 
     # Group by bins to infer grid size
     def group_by_bin(list, key, bin_size):
@@ -319,26 +253,21 @@ def detect_grid(points : list[np.ndarray],
         return bins
     
     x_bins = group_by_bin(normalized_points, key=lambda p: p[0], bin_size=x_bin_size)
-    y_bins = group_by_bin(normalized_points, key=lambda p: p[1], bin_size=x_bin_size)
+    y_bins = group_by_bin(normalized_points, key=lambda p: p[1], bin_size=y_bin_size)
 
-    # check for discrepancies
+    # check for discrepancies (max bin length mode vs. other axis' bin count)
     x_size = mode([len(b) for b in y_bins], "max")
     y_size = mode([len(b) for b in x_bins], "max")
 
     if x_size != len(x_bins) or y_size != len(y_bins):
-        # print("x:", x_size, len(y_bins), "y:", y_size, len(x_bins))
         return None
     
     grid = Grid()
     
     grid.dims = np.array([x_size, y_size], dtype=np.int32)
-    grid.offset = offset
+    grid.origin = offset
     grid.basis_u = horizontal_axis / (x_size - 1)
     grid.basis_v = vertical_axis / (y_size - 1)
-
-    proj_mat = np.linalg.inv(np.column_stack([grid.basis_u, grid.basis_v]))
-    grid.proj_u = proj_mat[0]
-    grid.proj_v = proj_mat[1]
 
     return grid
     

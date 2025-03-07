@@ -7,6 +7,8 @@ def plot_grid(points, grid : Grid, label=None):
     """
     origin, u_basis, v_basis, dims = grid.origin, grid.basis_u, grid.basis_v, grid.dims
     plt.figure(figsize=(8, 8))
+    plt.xlim(-0.1, 1.1)  
+    plt.ylim(-0.1, 1.1)  
 
     for i in range(dims[0]):
         plt.plot([origin[0] + i * u_basis[0], origin[0] + i * u_basis[0] + v_basis[0] * (dims[1] - 1)], 
@@ -41,6 +43,8 @@ def dump_points(points, label=None):
     """
     global N_DUMPS
     plt.figure(figsize=(8, 8))
+    plt.xlim(-0.25, 1.25)  
+    plt.ylim(-0.25, 1.25)  
         
     for point in points:
         plt.plot(point[0], point[1], 'o', color='gray', markersize=16, markeredgewidth=6, fillstyle='none', zorder=2)
